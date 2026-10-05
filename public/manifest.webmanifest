@@ -1,7 +1,7 @@
 {
   "name":"Legacy Staff",
   "short_name":"Legacy Staff",
-  "start_url":"/attendance.html",
+  "start_url":"/",
   "display":"standalone",
   "background_color":"#f6f8fb",
   "theme_color":"#f15a24",

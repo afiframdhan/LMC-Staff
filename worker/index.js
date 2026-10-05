@@ -72,6 +72,9 @@ async function handleAdminApi(request,env){
     if(p==='/api/admin/attendance' && request.method==='POST') return json({ok:true,data:await saveAttendance(env,admin,await readJson(request))});
     if(p.startsWith('/api/admin/attendance/') && request.method==='DELETE') return json({ok:true,data:await deleteAttendance(env,admin,p.split('/').pop())});
     if(p==='/api/admin/audit' && request.method==='GET') return json({ok:true,data:{rows:await sbRows(env,'staff_audit_logs',{order:'created_at.desc',limit:'300'})}});
+    if(p==='/api/admin/audit' && request.method==='DELETE') return json({ok:true,data:await clearAuditLogs(env)});
+    if(p.match(/^\/api\/admin\/audit\/[^/]+$/) && request.method==='DELETE') return json({ok:true,data:await deleteAuditLog(env,p.split('/')[4])});
+    if(p==='/api/admin/staff-photo' && request.method==='POST') return json({ok:true,data:await uploadStaffPhoto(env,admin,await readJson(request))});
     if(p==='/api/admin/kiosks' && request.method==='GET') return json({ok:true,data:{rows:await listKiosks(env)}});
     if(p==='/api/admin/kiosk/activate' && request.method==='POST') return json({ok:true,data:await activateKiosk(env,admin,await readJson(request))});
     if(p.match(/^\/api\/admin\/kiosk\/[^/]+\/rename$/) && request.method==='POST') return json({ok:true,data:await renameKiosk(env,admin,p.split('/')[4],await readJson(request))});
@@ -147,30 +150,57 @@ async function activateKiosk(env,admin,b){
   const token=randomValue(40), tokenHash=await shaB64(new TextEncoder().encode(token));
   const d=await supabaseRest(env,'/rest/v1/staff_kiosk_devices',{method:'POST',headers:{'content-type':'application/json',Prefer:'return=representation'},body:JSON.stringify({device_name:deviceName,token_hash:tokenHash,active:true,created_by:admin.email})});
   await audit(env,admin,'activate_kiosk','kiosk',d?.[0]?.kiosk_id||'',{deviceName});
-  return{message:'Perangkat berhasil diaktifkan sebagai Kiosk Absensi.',kioskId:d?.[0]?.kiosk_id,deviceName,token};
+  return{message:'Perangkat berhasil diaktifkan sebagai HP Absensi.',kioskId:d?.[0]?.kiosk_id,deviceName,token};
 }
 async function renameKiosk(env,admin,id,b){
-  if(!id)throw new Error('Kiosk tidak valid.');
+  if(!id)throw new Error('Perangkat tidak valid.');
   const deviceName=String(b.deviceName||'').trim();
-  if(!deviceName)throw new Error('Nama Kiosk wajib diisi.');
+  if(!deviceName)throw new Error('Nama perangkat wajib diisi.');
   const rows=await supabaseRest(env,`/rest/v1/staff_kiosk_devices?kiosk_id=eq.${encodeURIComponent(id)}`,{method:'PATCH',headers:{'content-type':'application/json',Prefer:'return=representation'},body:JSON.stringify({device_name:deviceName})});
-  if(!rows?.length)throw new Error('Perangkat Kiosk tidak ditemukan.');
+  if(!rows?.length)throw new Error('Perangkat absensi tidak ditemukan.');
   await audit(env,admin,'rename_kiosk','kiosk',id,{deviceName});
-  return{message:'Nama Kiosk berhasil diubah.',kioskId:id,deviceName};
+  return{message:'Nama perangkat berhasil diubah.',kioskId:id,deviceName};
 }
 async function revokeKiosk(env,admin,id){
-  if(!id)throw new Error('Kiosk tidak valid.');
+  if(!id)throw new Error('Perangkat tidak valid.');
   await supabaseRest(env,`/rest/v1/staff_kiosk_devices?kiosk_id=eq.${encodeURIComponent(id)}`,{method:'PATCH',headers:{'content-type':'application/json',Prefer:'return=minimal'},body:JSON.stringify({active:false,revoked_at:new Date().toISOString()})});
   await audit(env,admin,'revoke_kiosk','kiosk',id);
-  return{message:'Akses Kiosk perangkat dinonaktifkan.'};
+  return{message:'Akses perangkat absensi dinonaktifkan.'};
 }
 async function deleteKiosk(env,admin,id){
-  if(!id)throw new Error('Kiosk tidak valid.');
+  if(!id)throw new Error('Perangkat tidak valid.');
   const rows=await sbRows(env,'staff_kiosk_devices',{kiosk_id:`eq.${id}`,limit:'1'});
-  if(!rows[0])throw new Error('Perangkat Kiosk tidak ditemukan.');
+  if(!rows[0])throw new Error('Perangkat absensi tidak ditemukan.');
   await supabaseRest(env,`/rest/v1/staff_kiosk_devices?kiosk_id=eq.${encodeURIComponent(id)}`,{method:'DELETE',headers:{Prefer:'return=minimal'}});
   await audit(env,admin,'delete_kiosk','kiosk',id,{deviceName:rows[0].device_name||''});
-  return{message:'Perangkat Kiosk berhasil dihapus permanen.'};
+  return{message:'Perangkat absensi berhasil dihapus permanen.'};
+}
+async function deleteAuditLog(env,id){
+  if(!id)throw new Error('Audit log tidak valid.');
+  const rows=await sbRows(env,'staff_audit_logs',{audit_id:`eq.${id}`,limit:'1'});
+  if(!rows[0])throw new Error('Audit log tidak ditemukan.');
+  await supabaseRest(env,`/rest/v1/staff_audit_logs?audit_id=eq.${encodeURIComponent(id)}`,{method:'DELETE',headers:{Prefer:'return=minimal'}});
+  return{message:'Audit log dihapus.'};
+}
+async function clearAuditLogs(env){
+  await supabaseRest(env,'/rest/v1/staff_audit_logs?audit_id=not.is.null',{method:'DELETE',headers:{Prefer:'return=minimal'}});
+  return{message:'Semua audit log dihapus.'};
+}
+async function uploadStaffPhoto(env,admin,b){
+  const endpoint=String(env.STAFF_PHOTO_APPS_SCRIPT_URL||'').trim();
+  const secret=String(env.STAFF_PHOTO_UPLOAD_SECRET||'').trim();
+  if(!endpoint||!secret)throw new Error('Upload foto Google Drive belum dikonfigurasi di Cloudflare.');
+  const imageData=String(b.imageData||'');
+  if(!/^data:image\/(jpeg|jpg|png|webp);base64,/i.test(imageData))throw new Error('Format foto tidak valid.');
+  if(imageData.length>4_500_000)throw new Error('Ukuran foto terlalu besar. Crop atau kompres foto terlebih dahulu.');
+  const employeeCode=String(b.employeeCode||'STAFF').trim().toUpperCase().replace(/[^A-Z0-9_-]+/g,'-').slice(0,40)||'STAFF';
+  const staffName=String(b.staffName||'Staff').trim().slice(0,100)||'Staff';
+  const oldPhotoUrl=String(b.oldPhotoUrl||'').trim();
+  const r=await fetch(endpoint,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({action:'uploadStaffPhoto',secret,employeeCode,staffName,imageData,oldPhotoUrl})});
+  const text=await r.text(); let d; try{d=JSON.parse(text)}catch{throw new Error('Respons Apps Script upload foto tidak valid.');}
+  if(!r.ok||!d?.ok||!d?.url)throw new Error(d?.error||`Upload foto gagal (${r.status}).`);
+  await audit(env,admin,'upload_staff_photo','staff',String(b.staffId||employeeCode),{employeeCode,fileId:d.fileId||''});
+  return{photoUrl:d.url,fileId:d.fileId||'',message:'Foto berhasil diupload ke Google Drive.'};
 }
 async function getAttendanceReport(env,url){
   const month=String(url.searchParams.get('month')||'').trim();
@@ -185,10 +215,10 @@ async function getAttendanceReport(env,url){
 }
 async function requireKiosk(request,env){
   const token=String(request.headers.get('x-kiosk-token')||'').trim();
-  if(!token)throw Object.assign(new Error('Perangkat ini belum diaktifkan sebagai Kiosk Absensi.'),{status:401});
+  if(!token)throw Object.assign(new Error('Perangkat ini belum diaktifkan sebagai HP Absensi.'),{status:401});
   const tokenHash=await shaB64(new TextEncoder().encode(token));
   const row=(await sbRows(env,'staff_kiosk_devices',{token_hash:`eq.${tokenHash}`,active:'eq.true',limit:'1'}))[0];
-  if(!row)throw Object.assign(new Error('Akses Kiosk tidak valid atau sudah dinonaktifkan.'),{status:403});
+  if(!row)throw Object.assign(new Error('Akses perangkat absensi tidak valid atau sudah dinonaktifkan.'),{status:403});
   return row;
 }
 async function handleKioskApi(request,env){
@@ -218,7 +248,7 @@ async function handleKioskApi(request,env){
       const s=(await sbRows(env,'staff_employees',{staff_id:`eq.${sid}`,status:'eq.Aktif',limit:'1'}))[0]; if(!s)throw new Error('Staff tidak ditemukan atau tidak aktif.');
       const now=jakartaNow(), ex=(await sbRows(env,'staff_attendance',{staff_id:`eq.${sid}`,attendance_date:`eq.${now.date}`,limit:'1'}))[0];
       const verificationMethod=method==='face'?'face':'kiosk';
-      const recordedBy=method==='face'?`Face Kiosk: ${kiosk.device_name}`:`QR/NFC Kiosk: ${kiosk.device_name}`;
+      const recordedBy=method==='face'?`Face Recognition: ${kiosk.device_name}`:`QR/NFC: ${kiosk.device_name}`;
       const biometricVerifiedAt=method==='face'?new Date().toISOString():null;
       const faceDistance=method==='face'?proofData.d:null;
       let action='check-in',message=`Jam masuk ${now.time.slice(0,5)} berhasil dicatat.`;
@@ -232,7 +262,7 @@ async function handleKioskApi(request,env){
       await audit(env,{email:`kiosk:${kiosk.device_name}`},method==='face'?'face_attendance':'kiosk_attendance','attendance',sid,{staff:s.full_name,action,date:now.date,time:now.time.slice(0,5),method,distance:faceDistance});
       return json({ok:true,data:{staffName:s.full_name,action,message,date:now.date,time:now.time.slice(0,5),method:verificationMethod}});
     }
-    return json({ok:false,error:'Endpoint Kiosk tidak ditemukan.'},404);
+    return json({ok:false,error:'Endpoint perangkat absensi tidak ditemukan.'},404);
   }catch(e){return json({ok:false,error:e.message||String(e)},e.status||400)}
 }
 

@@ -19,6 +19,6 @@ Gunakan key modern Supabase 2026:
 - `SUPABASE_PUBLISHABLE_KEY`
 - `SUPABASE_SECRET_KEY`
 
-Kode tetap kompatibel dengan `SUPABASE_ANON_KEY` dan `SUPABASE_SERVICE_ROLE_KEY` legacy bila diperlukan.
+Kode tetap kompatibel dengan `SUPABASE_ANON_KEY` dan `SUPABASE_SERVICE_ROLE_KEY` legacy bila diperlukan. 
 
 Baca `SETUP-ID.md` untuk instalasi lengkap.

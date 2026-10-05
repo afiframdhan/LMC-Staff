@@ -7,6 +7,7 @@ export default {
     if (url.pathname === '/api/admin/login' && request.method === 'POST') return adminLogin(request, env);
     if (url.pathname === '/api/admin/refresh' && request.method === 'POST') return adminRefresh(request, env);
     if (url.pathname.startsWith('/api/staff-biometric/')) return handleStaffBiometricApi(request, env);
+    if (url.pathname.startsWith('/api/kiosk/')) return handleKioskApi(request, env);
     if (url.pathname.startsWith('/api/admin/')) return handleAdminApi(request, env);
     return env.ASSETS.fetch(request);
   }
@@ -69,11 +70,14 @@ async function handleAdminApi(request,env){
     if(p==='/api/admin/attendance' && request.method==='POST') return json({ok:true,data:await saveAttendance(env,admin,await readJson(request))});
     if(p.startsWith('/api/admin/attendance/') && request.method==='DELETE') return json({ok:true,data:await deleteAttendance(env,admin,p.split('/').pop())});
     if(p==='/api/admin/audit' && request.method==='GET') return json({ok:true,data:{rows:await sbRows(env,'staff_audit_logs',{order:'created_at.desc',limit:'300'})}});
+    if(p==='/api/admin/kiosks' && request.method==='GET') return json({ok:true,data:{rows:await listKiosks(env)}});
+    if(p==='/api/admin/kiosk/activate' && request.method==='POST') return json({ok:true,data:await activateKiosk(env,admin,await readJson(request))});
+    if(p.match(/^\/api\/admin\/kiosk\/[^/]+\/revoke$/) && request.method==='POST') return json({ok:true,data:await revokeKiosk(env,admin,p.split('/')[4])});
     return json({ok:false,error:'Endpoint Admin tidak ditemukan.'},404);
   }catch(e){return json({ok:false,error:e.message||String(e)},e.status||400)}
 }
 async function audit(env,admin,action,entityType,entityId,details={}){try{await supabaseRest(env,'/rest/v1/staff_audit_logs',{method:'POST',headers:{'content-type':'application/json',Prefer:'return=minimal'},body:JSON.stringify({actor_email:admin?.email||'system',action,entity_type:entityType,entity_id:String(entityId||''),details})})}catch{}}
-function mapStaff(r,counts=new Map()){return{staffId:r.staff_id,employeeCode:r.employee_code||'',name:r.full_name||'',position:r.position||'',email:r.email||'',phone:r.phone||'',joinedOn:r.joined_on||'',endedOn:r.ended_on||'',status:r.status||'Aktif',notes:r.notes||'',biometricCount:counts.get(String(r.staff_id))||0}}
+function mapStaff(r,counts=new Map()){return{staffId:r.staff_id,employeeCode:r.employee_code||'',name:r.full_name||'',position:r.position||'',email:r.email||'',phone:r.phone||'',joinedOn:r.joined_on||'',endedOn:r.ended_on||'',status:r.status||'Aktif',notes:r.notes||'',photoUrl:r.photo_url||'',biometricCount:counts.get(String(r.staff_id))||0}}
 function trimTime(v){const s=String(v||'');return /^\d{2}:\d{2}/.test(s)?s.slice(0,5):s}
 function mapAttendance(r){return{attendanceId:r.attendance_id,staffId:r.staff_id,staffName:r.staff_name_snapshot||'',position:r.position_snapshot||'',date:r.attendance_date||'',status:r.status||'',checkIn:trimTime(r.check_in),checkOut:trimTime(r.check_out),notes:r.notes||'',verificationMethod:r.verification_method||'admin',verifiedAt:r.biometric_verified_at||'',recordedBy:r.recorded_by||''}}
 async function getAdminDashboard(env){
@@ -83,7 +87,7 @@ async function getAdminDashboard(env){
 }
 async function saveStaff(env,admin,b){
   const id=String(b.staffId||'').trim(), code=String(b.employeeCode||'').trim().toUpperCase(), name=String(b.name||'').trim(), position=String(b.position||'').trim(); if(!code||!name||!position)throw new Error('Kode staff, nama, dan jabatan wajib diisi.');
-  const row={employee_code:code,full_name:name,position,email:String(b.email||'').trim()||null,phone:String(b.phone||'').trim()||null,joined_on:b.joinedOn||null,ended_on:b.endedOn||null,status:['Aktif','Cuti','Nonaktif'].includes(b.status)?b.status:'Aktif',notes:String(b.notes||'').trim()||null,updated_at:new Date().toISOString()};
+  const row={employee_code:code,full_name:name,position,email:String(b.email||'').trim()||null,phone:String(b.phone||'').trim()||null,joined_on:b.joinedOn||null,ended_on:b.endedOn||null,status:['Aktif','Cuti','Nonaktif'].includes(b.status)?b.status:'Aktif',notes:String(b.notes||'').trim()||null,photo_url:String(b.photoUrl||'').trim()||null,updated_at:new Date().toISOString()};
   let d;if(id)d=await supabaseRest(env,`/rest/v1/staff_employees?staff_id=eq.${encodeURIComponent(id)}`,{method:'PATCH',headers:{'content-type':'application/json',Prefer:'return=representation'},body:JSON.stringify(row)});else d=await supabaseRest(env,'/rest/v1/staff_employees',{method:'POST',headers:{'content-type':'application/json',Prefer:'return=representation'},body:JSON.stringify(row)});
   const saved=d?.[0]; await audit(env,admin,id?'update_staff':'create_staff','staff',saved?.staff_id||id,{name,position,code}); return{message:id?'Data staff diperbarui.':'Staff ditambahkan.',staff:saved?mapStaff(saved):null};
 }
@@ -95,6 +99,62 @@ async function saveAttendance(env,admin,b){
   let d;if(target)d=await supabaseRest(env,`/rest/v1/staff_attendance?attendance_id=eq.${encodeURIComponent(target)}`,{method:'PATCH',headers:{'content-type':'application/json',Prefer:'return=representation'},body:JSON.stringify(row)});else d=await supabaseRest(env,'/rest/v1/staff_attendance',{method:'POST',headers:{'content-type':'application/json',Prefer:'return=representation'},body:JSON.stringify(row)});
   await audit(env,admin,target?'update_attendance':'create_attendance','attendance',d?.[0]?.attendance_id||target,{staff:s.full_name,date}); return{message:'Absensi berhasil disimpan.',attendance:d?.[0]?mapAttendance(d[0]):null};
 }
+
+async function listKiosks(env){
+  const rows=await sbRows(env,'staff_kiosk_devices',{order:'created_at.desc',limit:'50'}).catch(()=>[]);
+  return rows.map(x=>({kioskId:x.kiosk_id,deviceName:x.device_name,active:!!x.active,createdBy:x.created_by||'',createdAt:x.created_at,lastUsedAt:x.last_used_at||'',revokedAt:x.revoked_at||''}));
+}
+async function activateKiosk(env,admin,b){
+  const deviceName=String(b.deviceName||'').trim()||'HP Kantor';
+  const token=randomValue(40), tokenHash=await shaB64(new TextEncoder().encode(token));
+  const d=await supabaseRest(env,'/rest/v1/staff_kiosk_devices',{method:'POST',headers:{'content-type':'application/json',Prefer:'return=representation'},body:JSON.stringify({device_name:deviceName,token_hash:tokenHash,active:true,created_by:admin.email})});
+  await audit(env,admin,'activate_kiosk','kiosk',d?.[0]?.kiosk_id||'',{deviceName});
+  return{message:'Perangkat berhasil diaktifkan sebagai Kiosk Absensi.',kioskId:d?.[0]?.kiosk_id,deviceName,token};
+}
+async function revokeKiosk(env,admin,id){
+  if(!id)throw new Error('Kiosk tidak valid.');
+  await supabaseRest(env,`/rest/v1/staff_kiosk_devices?kiosk_id=eq.${encodeURIComponent(id)}`,{method:'PATCH',headers:{'content-type':'application/json',Prefer:'return=minimal'},body:JSON.stringify({active:false,revoked_at:new Date().toISOString()})});
+  await audit(env,admin,'revoke_kiosk','kiosk',id);
+  return{message:'Akses Kiosk perangkat dinonaktifkan.'};
+}
+async function requireKiosk(request,env){
+  const token=String(request.headers.get('x-kiosk-token')||'').trim();
+  if(!token)throw Object.assign(new Error('Perangkat ini belum diaktifkan sebagai Kiosk Absensi.'),{status:401});
+  const tokenHash=await shaB64(new TextEncoder().encode(token));
+  const row=(await sbRows(env,'staff_kiosk_devices',{token_hash:`eq.${tokenHash}`,active:'eq.true',limit:'1'}))[0];
+  if(!row)throw Object.assign(new Error('Akses Kiosk tidak valid atau sudah dinonaktifkan.'),{status:403});
+  return row;
+}
+async function handleKioskApi(request,env){
+  try{
+    const kiosk=await requireKiosk(request,env), url=new URL(request.url), p=url.pathname;
+    if(p==='/api/kiosk/status' && request.method==='GET') return json({ok:true,data:{active:true,kioskId:kiosk.kiosk_id,deviceName:kiosk.device_name}});
+    if(p==='/api/kiosk/staff' && request.method==='GET'){
+      const code=String(url.searchParams.get('code')||'').trim().toUpperCase(); if(!code)throw new Error('Kode staff kosong.');
+      const s=(await sbRows(env,'staff_employees',{employee_code:`eq.${code}`,status:'eq.Aktif',limit:'1'}))[0]; if(!s)throw new Error('Staff tidak ditemukan atau tidak aktif.');
+      const now=jakartaNow(), ex=(await sbRows(env,'staff_attendance',{staff_id:`eq.${s.staff_id}`,attendance_date:`eq.${now.date}`,limit:'1'}))[0];
+      let nextAction='check-in',state='Belum absen hari ini'; if(ex?.check_in&&!ex?.check_out){nextAction='check-out';state=`Sudah masuk ${trimTime(ex.check_in)}`;} else if(ex?.check_in&&ex?.check_out){nextAction='complete';state=`Absensi lengkap • ${trimTime(ex.check_in)}–${trimTime(ex.check_out)}`;}
+      return json({ok:true,data:{staffId:s.staff_id,employeeCode:s.employee_code,name:s.full_name,position:s.position,photoUrl:s.photo_url||'',date:now.date,nextAction,state}});
+    }
+    if(p==='/api/kiosk/attendance' && request.method==='POST'){
+      const b=await readJson(request), sid=String(b.staffId||''); if(!sid)throw new Error('Staff tidak valid.');
+      const s=(await sbRows(env,'staff_employees',{staff_id:`eq.${sid}`,status:'eq.Aktif',limit:'1'}))[0]; if(!s)throw new Error('Staff tidak ditemukan atau tidak aktif.');
+      const now=jakartaNow(), ex=(await sbRows(env,'staff_attendance',{staff_id:`eq.${sid}`,attendance_date:`eq.${now.date}`,limit:'1'}))[0];
+      let action='check-in',message=`Jam masuk ${now.time.slice(0,5)} berhasil dicatat.`;
+      if(!ex){
+        await supabaseRest(env,'/rest/v1/staff_attendance',{method:'POST',headers:{'content-type':'application/json',Prefer:'return=minimal'},body:JSON.stringify({staff_id:sid,staff_name_snapshot:s.full_name,position_snapshot:s.position,attendance_date:now.date,status:'Hadir',check_in:now.time,verification_method:'kiosk',recorded_by:`Kiosk: ${kiosk.device_name}`})});
+      }else if(!ex.check_out){
+        action='check-out';message=`Jam pulang ${now.time.slice(0,5)} berhasil dicatat.`;
+        await supabaseRest(env,`/rest/v1/staff_attendance?attendance_id=eq.${ex.attendance_id}`,{method:'PATCH',headers:{'content-type':'application/json',Prefer:'return=minimal'},body:JSON.stringify({check_out:now.time,verification_method:'kiosk',recorded_by:`Kiosk: ${kiosk.device_name}`,updated_at:new Date().toISOString()})});
+      }else{action='complete';message=`Absensi hari ini sudah lengkap. Masuk ${trimTime(ex.check_in)} • Pulang ${trimTime(ex.check_out)}.`;}
+      await supabaseRest(env,`/rest/v1/staff_kiosk_devices?kiosk_id=eq.${encodeURIComponent(kiosk.kiosk_id)}`,{method:'PATCH',headers:{'content-type':'application/json',Prefer:'return=minimal'},body:JSON.stringify({last_used_at:new Date().toISOString()})});
+      await audit(env,{email:`kiosk:${kiosk.device_name}`},'kiosk_attendance','attendance',sid,{staff:s.full_name,action,date:now.date,time:now.time.slice(0,5)});
+      return json({ok:true,data:{staffName:s.full_name,action,message,date:now.date,time:now.time.slice(0,5)}});
+    }
+    return json({ok:false,error:'Endpoint Kiosk tidak ditemukan.'},404);
+  }catch(e){return json({ok:false,error:e.message||String(e)},e.status||400)}
+}
+
 async function deleteAttendance(env,admin,id){await supabaseRest(env,`/rest/v1/staff_attendance?attendance_id=eq.${encodeURIComponent(id)}`,{method:'DELETE',headers:{Prefer:'return=minimal'}});await audit(env,admin,'delete_attendance','attendance',id);return{message:'Absensi dihapus.'}}
 
 function randomValue(n=32){const a=new Uint8Array(n);crypto.getRandomValues(a);return b64e(a)}

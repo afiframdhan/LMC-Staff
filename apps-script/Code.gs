@@ -28,7 +28,7 @@ function doPost(e) {
     const filename = `${code}_${name}_${Utilities.formatDate(new Date(), Session.getScriptTimeZone() || 'Asia/Jakarta', 'yyyyMMdd_HHmmss')}.${ext}`;
     const blob = Utilities.newBlob(bytes, mime, filename);
     const file = folder.createFile(blob);
-    file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+    makePublic_(file);
 
     // Hapus foto lama jika URL lama memang menunjuk file Drive dan file tersebut berada di folder yang sama.
     try {
@@ -48,6 +48,37 @@ function doPost(e) {
     return json_({ok:false,error:String(err && err.message || err)});
   }
 }
+
+function makePublic_(file) {
+  // Coba cara standar DriveApp lebih dulu.
+  try {
+    file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+    return;
+  } catch (driveAppErr) {
+    // Pada sebagian deployment Web App, setSharing() bisa ditolak walau createFile() berhasil.
+    // Fallback ke Google Drive REST API memakai OAuth token milik script owner.
+    const url = 'https://www.googleapis.com/drive/v3/files/' + encodeURIComponent(file.getId()) + '/permissions?supportsAllDrives=true';
+    const response = UrlFetchApp.fetch(url, {
+      method: 'post',
+      contentType: 'application/json',
+      headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() },
+      payload: JSON.stringify({ type: 'anyone', role: 'reader', allowFileDiscovery: false }),
+      muteHttpExceptions: true
+    });
+    const code = response.getResponseCode();
+    if (code < 200 || code >= 300) {
+      // Jangan tinggalkan file duplikat/orphan bila izin publik gagal.
+      try { file.setTrashed(true); } catch (_) {}
+      let detail = response.getContentText();
+      try {
+        const parsed = JSON.parse(detail);
+        detail = parsed && parsed.error && parsed.error.message ? parsed.error.message : detail;
+      } catch (_) {}
+      throw new Error('Foto gagal dibuat publik di Google Drive. ' + detail);
+    }
+  }
+}
+
 function safe_(v) { return String(v || '').trim().replace(/[^A-Za-z0-9 _.-]+/g,'').replace(/\s+/g,' ').slice(0,60) || 'Staff'; }
 function extractDriveId_(url) {
   const s = String(url || '');

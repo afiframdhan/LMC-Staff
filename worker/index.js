@@ -67,6 +67,8 @@ async function handleAdminApi(request,env){
     if(p.startsWith('/api/admin/staff/') && request.method==='DELETE') return json({ok:true,data:await deleteStaff(env,admin,p.split('/').pop())});
     if(p.match(/^\/api\/admin\/staff\/[^/]+\/enroll$/) && request.method==='POST') return json({ok:true,data:await createEnrollment(env,admin,p.split('/')[4],request)});
     if(p.match(/^\/api\/admin\/staff\/[^/]+\/reset-passkeys$/) && request.method==='POST') return json({ok:true,data:await resetPasskeys(env,admin,p.split('/')[4])});
+    if(p.match(/^\/api\/admin\/staff\/[^/]+\/face$/) && request.method==='POST') return json({ok:true,data:await saveFaceDescriptor(env,admin,p.split('/')[4],await readJson(request))});
+    if(p.match(/^\/api\/admin\/staff\/[^/]+\/face$/) && request.method==='DELETE') return json({ok:true,data:await clearFaceDescriptor(env,admin,p.split('/')[4])});
     if(p==='/api/admin/attendance' && request.method==='POST') return json({ok:true,data:await saveAttendance(env,admin,await readJson(request))});
     if(p.startsWith('/api/admin/attendance/') && request.method==='DELETE') return json({ok:true,data:await deleteAttendance(env,admin,p.split('/').pop())});
     if(p==='/api/admin/audit' && request.method==='GET') return json({ok:true,data:{rows:await sbRows(env,'staff_audit_logs',{order:'created_at.desc',limit:'300'})}});
@@ -77,9 +79,9 @@ async function handleAdminApi(request,env){
   }catch(e){return json({ok:false,error:e.message||String(e)},e.status||400)}
 }
 async function audit(env,admin,action,entityType,entityId,details={}){try{await supabaseRest(env,'/rest/v1/staff_audit_logs',{method:'POST',headers:{'content-type':'application/json',Prefer:'return=minimal'},body:JSON.stringify({actor_email:admin?.email||'system',action,entity_type:entityType,entity_id:String(entityId||''),details})})}catch{}}
-function mapStaff(r,counts=new Map()){return{staffId:r.staff_id,employeeCode:r.employee_code||'',name:r.full_name||'',position:r.position||'',email:r.email||'',phone:r.phone||'',joinedOn:r.joined_on||'',endedOn:r.ended_on||'',status:r.status||'Aktif',notes:r.notes||'',photoUrl:r.photo_url||'',biometricCount:counts.get(String(r.staff_id))||0}}
+function mapStaff(r,counts=new Map()){return{staffId:r.staff_id,employeeCode:r.employee_code||'',name:r.full_name||'',position:r.position||'',email:r.email||'',phone:r.phone||'',joinedOn:r.joined_on||'',endedOn:r.ended_on||'',status:r.status||'Aktif',notes:r.notes||'',photoUrl:r.photo_url||'',biometricCount:counts.get(String(r.staff_id))||0,faceEnrolled:Array.isArray(r.face_descriptor)&&r.face_descriptor.length===128,faceEnrolledAt:r.face_enrolled_at||''}}
 function trimTime(v){const s=String(v||'');return /^\d{2}:\d{2}/.test(s)?s.slice(0,5):s}
-function mapAttendance(r){return{attendanceId:r.attendance_id,staffId:r.staff_id,staffName:r.staff_name_snapshot||'',position:r.position_snapshot||'',date:r.attendance_date||'',status:r.status||'',checkIn:trimTime(r.check_in),checkOut:trimTime(r.check_out),notes:r.notes||'',verificationMethod:r.verification_method||'admin',verifiedAt:r.biometric_verified_at||'',recordedBy:r.recorded_by||''}}
+function mapAttendance(r){return{attendanceId:r.attendance_id,staffId:r.staff_id,staffName:r.staff_name_snapshot||'',position:r.position_snapshot||'',date:r.attendance_date||'',status:r.status||'',checkIn:trimTime(r.check_in),checkOut:trimTime(r.check_out),notes:r.notes||'',verificationMethod:r.verification_method||'admin',verifiedAt:r.biometric_verified_at||'',recordedBy:r.recorded_by||'',faceMatchDistance:r.face_match_distance==null?null:Number(r.face_match_distance)}}
 async function getAdminDashboard(env){
   const [staff,att,creds]=await Promise.all([sbRows(env,'staff_employees',{order:'full_name.asc'}),sbRows(env,'staff_attendance',{order:'attendance_date.desc,created_at.desc',limit:'1200'}),sbRows(env,'staff_webauthn_credentials',{active:'eq.true',select:'staff_id,credential_id'}).catch(()=>[])]);
   const c=new Map(); for(const x of creds)c.set(String(x.staff_id),(c.get(String(x.staff_id))||0)+1);
@@ -99,6 +101,39 @@ async function saveAttendance(env,admin,b){
   let d;if(target)d=await supabaseRest(env,`/rest/v1/staff_attendance?attendance_id=eq.${encodeURIComponent(target)}`,{method:'PATCH',headers:{'content-type':'application/json',Prefer:'return=representation'},body:JSON.stringify(row)});else d=await supabaseRest(env,'/rest/v1/staff_attendance',{method:'POST',headers:{'content-type':'application/json',Prefer:'return=representation'},body:JSON.stringify(row)});
   await audit(env,admin,target?'update_attendance':'create_attendance','attendance',d?.[0]?.attendance_id||target,{staff:s.full_name,date}); return{message:'Absensi berhasil disimpan.',attendance:d?.[0]?mapAttendance(d[0]):null};
 }
+
+
+function validateFaceDescriptor(v){
+  if(!Array.isArray(v)||v.length!==128) throw new Error('Descriptor wajah tidak valid. Ambil ulang data wajah.');
+  const out=v.map(Number); if(out.some(x=>!Number.isFinite(x)||Math.abs(x)>10)) throw new Error('Descriptor wajah tidak valid.');
+  return out.map(x=>Number(x.toFixed(8)));
+}
+async function saveFaceDescriptor(env,admin,staffId,b){
+  const s=(await sbRows(env,'staff_employees',{staff_id:`eq.${staffId}`,limit:'1'}))[0]; if(!s)throw new Error('Staff tidak ditemukan.');
+  const descriptor=validateFaceDescriptor(b.descriptor), now=new Date().toISOString();
+  await supabaseRest(env,`/rest/v1/staff_employees?staff_id=eq.${encodeURIComponent(staffId)}`,{method:'PATCH',headers:{'content-type':'application/json',Prefer:'return=minimal'},body:JSON.stringify({face_descriptor:descriptor,face_enrolled_at:now,face_model:String(b.model||'face-api.js-0.22.2')})});
+  await audit(env,admin,'enroll_face','staff',staffId,{name:s.full_name,model:String(b.model||'face-api.js-0.22.2')});
+  return{message:`Wajah ${s.full_name} berhasil didaftarkan.`,faceEnrolledAt:now};
+}
+async function clearFaceDescriptor(env,admin,staffId){
+  const s=(await sbRows(env,'staff_employees',{staff_id:`eq.${staffId}`,limit:'1'}))[0]; if(!s)throw new Error('Staff tidak ditemukan.');
+  await supabaseRest(env,`/rest/v1/staff_employees?staff_id=eq.${encodeURIComponent(staffId)}`,{method:'PATCH',headers:{'content-type':'application/json',Prefer:'return=minimal'},body:JSON.stringify({face_descriptor:null,face_enrolled_at:null,face_model:null})});
+  await audit(env,admin,'reset_face','staff',staffId,{name:s.full_name});
+  return{message:`Data wajah ${s.full_name} dihapus.`};
+}
+function euclideanDistance(a,b){let sum=0;for(let i=0;i<128;i++){const d=Number(a[i])-Number(b[i]);sum+=d*d;}return Math.sqrt(sum)}
+function faceThreshold(env){const n=Number(env.FACE_MATCH_THRESHOLD||0.50);return Number.isFinite(n)?Math.min(.65,Math.max(.35,n)):.50}
+function b64urlText(text){return b64e(new TextEncoder().encode(text))}
+function unb64urlText(v){return new TextDecoder().decode(b64d(v))}
+async function hmacB64(secret,text){const key=await crypto.subtle.importKey('raw',new TextEncoder().encode(String(secret)),{name:'HMAC',hash:'SHA-256'},false,['sign']);return b64e(new Uint8Array(await crypto.subtle.sign('HMAC',key,new TextEncoder().encode(text))))}
+async function createFaceProof(env,kiosk,staffId,distance){const payload=b64urlText(JSON.stringify({sid:String(staffId),kid:String(kiosk.kiosk_id),exp:Date.now()+45000,d:Number(distance.toFixed(5))}));const sig=await hmacB64(env.FACE_PROOF_SECRET||secretKey(env),payload);return `${payload}.${sig}`}
+async function verifyFaceProof(env,kiosk,proof,staffId){
+  const [payload,sig]=String(proof||'').split('.'); if(!payload||!sig)throw new Error('Verifikasi wajah sudah tidak valid. Scan wajah kembali.');
+  const expected=await hmacB64(env.FACE_PROOF_SECRET||secretKey(env),payload); if(expected!==sig)throw new Error('Verifikasi wajah tidak valid.');
+  let d;try{d=JSON.parse(unb64urlText(payload))}catch{throw new Error('Verifikasi wajah rusak. Scan ulang.')} if(d.exp<Date.now())throw new Error('Verifikasi wajah kedaluwarsa. Scan ulang.');
+  if(String(d.sid)!==String(staffId)||String(d.kid)!==String(kiosk.kiosk_id))throw new Error('Verifikasi wajah tidak cocok dengan staff/perangkat.'); return d;
+}
+async function staffKioskState(env,s){const now=jakartaNow(),ex=(await sbRows(env,'staff_attendance',{staff_id:`eq.${s.staff_id}`,attendance_date:`eq.${now.date}`,limit:'1'}))[0];let nextAction='check-in',state='Belum absen hari ini';if(ex?.check_in&&!ex?.check_out){nextAction='check-out';state=`Sudah masuk ${trimTime(ex.check_in)}`;}else if(ex?.check_in&&ex?.check_out){nextAction='complete';state=`Absensi lengkap • ${trimTime(ex.check_in)}–${trimTime(ex.check_out)}`;}return{now,ex,nextAction,state}}
 
 async function listKiosks(env){
   const rows=await sbRows(env,'staff_kiosk_devices',{order:'created_at.desc',limit:'50'}).catch(()=>[]);
@@ -128,28 +163,43 @@ async function requireKiosk(request,env){
 async function handleKioskApi(request,env){
   try{
     const kiosk=await requireKiosk(request,env), url=new URL(request.url), p=url.pathname;
-    if(p==='/api/kiosk/status' && request.method==='GET') return json({ok:true,data:{active:true,kioskId:kiosk.kiosk_id,deviceName:kiosk.device_name}});
+    if(p==='/api/kiosk/status' && request.method==='GET') return json({ok:true,data:{active:true,kioskId:kiosk.kiosk_id,deviceName:kiosk.device_name,faceRequired:true,threshold:faceThreshold(env)}});
+    if(p==='/api/kiosk/face/identify' && request.method==='POST'){
+      const b=await readJson(request), descriptor=validateFaceDescriptor(b.descriptor), threshold=faceThreshold(env);
+      const staff=await sbRows(env,'staff_employees',{status:'eq.Aktif',face_descriptor:'not.is.null',select:'staff_id,employee_code,full_name,position,photo_url,face_descriptor',limit:'500'});
+      if(!staff.length)throw new Error('Belum ada wajah staff yang didaftarkan.');
+      const ranked=staff.map(x=>({s:x,d:euclideanDistance(descriptor,x.face_descriptor)})).sort((a,b)=>a.d-b.d), best=ranked[0], second=ranked[1];
+      if(!best||best.d>threshold)throw Object.assign(new Error('Wajah tidak dikenali. Pastikan wajah sudah didaftarkan dan pencahayaan cukup.'),{status:404});
+      if(second && second.d<=threshold && (second.d-best.d)<0.035)throw new Error('Wajah belum dapat dibedakan dengan yakin. Coba lagi dengan posisi lebih dekat dan pencahayaan lebih baik.');
+      const st=await staffKioskState(env,best.s), proof=await createFaceProof(env,kiosk,best.s.staff_id,best.d);
+      return json({ok:true,data:{staffId:best.s.staff_id,employeeCode:best.s.employee_code,name:best.s.full_name,position:best.s.position,photoUrl:best.s.photo_url||'',date:st.now.date,nextAction:st.nextAction,state:st.state,faceProof:proof,matchDistance:Number(best.d.toFixed(4)),threshold}});
+    }
     if(p==='/api/kiosk/staff' && request.method==='GET'){
       const code=String(url.searchParams.get('code')||'').trim().toUpperCase(); if(!code)throw new Error('Kode staff kosong.');
       const s=(await sbRows(env,'staff_employees',{employee_code:`eq.${code}`,status:'eq.Aktif',limit:'1'}))[0]; if(!s)throw new Error('Staff tidak ditemukan atau tidak aktif.');
-      const now=jakartaNow(), ex=(await sbRows(env,'staff_attendance',{staff_id:`eq.${s.staff_id}`,attendance_date:`eq.${now.date}`,limit:'1'}))[0];
-      let nextAction='check-in',state='Belum absen hari ini'; if(ex?.check_in&&!ex?.check_out){nextAction='check-out';state=`Sudah masuk ${trimTime(ex.check_in)}`;} else if(ex?.check_in&&ex?.check_out){nextAction='complete';state=`Absensi lengkap • ${trimTime(ex.check_in)}–${trimTime(ex.check_out)}`;}
-      return json({ok:true,data:{staffId:s.staff_id,employeeCode:s.employee_code,name:s.full_name,position:s.position,photoUrl:s.photo_url||'',date:now.date,nextAction,state}});
+      const st=await staffKioskState(env,s); return json({ok:true,data:{staffId:s.staff_id,employeeCode:s.employee_code,name:s.full_name,position:s.position,photoUrl:s.photo_url||'',date:st.now.date,nextAction:st.nextAction,state:st.state,faceEnrolled:Array.isArray(s.face_descriptor)&&s.face_descriptor.length===128}});
     }
     if(p==='/api/kiosk/attendance' && request.method==='POST'){
       const b=await readJson(request), sid=String(b.staffId||''); if(!sid)throw new Error('Staff tidak valid.');
+      const method=String(b.method||'kiosk').toLowerCase()==='face'?'face':'kiosk';
+      let proofData=null;
+      if(method==='face') proofData=await verifyFaceProof(env,kiosk,b.faceProof,sid);
       const s=(await sbRows(env,'staff_employees',{staff_id:`eq.${sid}`,status:'eq.Aktif',limit:'1'}))[0]; if(!s)throw new Error('Staff tidak ditemukan atau tidak aktif.');
       const now=jakartaNow(), ex=(await sbRows(env,'staff_attendance',{staff_id:`eq.${sid}`,attendance_date:`eq.${now.date}`,limit:'1'}))[0];
+      const verificationMethod=method==='face'?'face':'kiosk';
+      const recordedBy=method==='face'?`Face Kiosk: ${kiosk.device_name}`:`QR/NFC Kiosk: ${kiosk.device_name}`;
+      const biometricVerifiedAt=method==='face'?new Date().toISOString():null;
+      const faceDistance=method==='face'?proofData.d:null;
       let action='check-in',message=`Jam masuk ${now.time.slice(0,5)} berhasil dicatat.`;
       if(!ex){
-        await supabaseRest(env,'/rest/v1/staff_attendance',{method:'POST',headers:{'content-type':'application/json',Prefer:'return=minimal'},body:JSON.stringify({staff_id:sid,staff_name_snapshot:s.full_name,position_snapshot:s.position,attendance_date:now.date,status:'Hadir',check_in:now.time,verification_method:'kiosk',recorded_by:`Kiosk: ${kiosk.device_name}`})});
+        await supabaseRest(env,'/rest/v1/staff_attendance',{method:'POST',headers:{'content-type':'application/json',Prefer:'return=minimal'},body:JSON.stringify({staff_id:sid,staff_name_snapshot:s.full_name,position_snapshot:s.position,attendance_date:now.date,status:'Hadir',check_in:now.time,verification_method:verificationMethod,biometric_verified_at:biometricVerifiedAt,face_match_distance:faceDistance,recorded_by:recordedBy})});
       }else if(!ex.check_out){
         action='check-out';message=`Jam pulang ${now.time.slice(0,5)} berhasil dicatat.`;
-        await supabaseRest(env,`/rest/v1/staff_attendance?attendance_id=eq.${ex.attendance_id}`,{method:'PATCH',headers:{'content-type':'application/json',Prefer:'return=minimal'},body:JSON.stringify({check_out:now.time,verification_method:'kiosk',recorded_by:`Kiosk: ${kiosk.device_name}`,updated_at:new Date().toISOString()})});
+        await supabaseRest(env,`/rest/v1/staff_attendance?attendance_id=eq.${ex.attendance_id}`,{method:'PATCH',headers:{'content-type':'application/json',Prefer:'return=minimal'},body:JSON.stringify({check_out:now.time,verification_method:verificationMethod,biometric_verified_at:biometricVerifiedAt,face_match_distance:faceDistance,recorded_by:recordedBy,updated_at:new Date().toISOString()})});
       }else{action='complete';message=`Absensi hari ini sudah lengkap. Masuk ${trimTime(ex.check_in)} • Pulang ${trimTime(ex.check_out)}.`;}
       await supabaseRest(env,`/rest/v1/staff_kiosk_devices?kiosk_id=eq.${encodeURIComponent(kiosk.kiosk_id)}`,{method:'PATCH',headers:{'content-type':'application/json',Prefer:'return=minimal'},body:JSON.stringify({last_used_at:new Date().toISOString()})});
-      await audit(env,{email:`kiosk:${kiosk.device_name}`},'kiosk_attendance','attendance',sid,{staff:s.full_name,action,date:now.date,time:now.time.slice(0,5)});
-      return json({ok:true,data:{staffName:s.full_name,action,message,date:now.date,time:now.time.slice(0,5)}});
+      await audit(env,{email:`kiosk:${kiosk.device_name}`},method==='face'?'face_attendance':'kiosk_attendance','attendance',sid,{staff:s.full_name,action,date:now.date,time:now.time.slice(0,5),method,distance:faceDistance});
+      return json({ok:true,data:{staffName:s.full_name,action,message,date:now.date,time:now.time.slice(0,5),method:verificationMethod}});
     }
     return json({ok:false,error:'Endpoint Kiosk tidak ditemukan.'},404);
   }catch(e){return json({ok:false,error:e.message||String(e)},e.status||400)}

@@ -74,7 +74,10 @@ async function handleAdminApi(request,env){
     if(p==='/api/admin/audit' && request.method==='GET') return json({ok:true,data:{rows:await sbRows(env,'staff_audit_logs',{order:'created_at.desc',limit:'300'})}});
     if(p==='/api/admin/kiosks' && request.method==='GET') return json({ok:true,data:{rows:await listKiosks(env)}});
     if(p==='/api/admin/kiosk/activate' && request.method==='POST') return json({ok:true,data:await activateKiosk(env,admin,await readJson(request))});
+    if(p.match(/^\/api\/admin\/kiosk\/[^/]+\/rename$/) && request.method==='POST') return json({ok:true,data:await renameKiosk(env,admin,p.split('/')[4],await readJson(request))});
     if(p.match(/^\/api\/admin\/kiosk\/[^/]+\/revoke$/) && request.method==='POST') return json({ok:true,data:await revokeKiosk(env,admin,p.split('/')[4])});
+    if(p.match(/^\/api\/admin\/kiosk\/[^/]+$/) && request.method==='DELETE') return json({ok:true,data:await deleteKiosk(env,admin,p.split('/')[4])});
+    if(p==='/api/admin/attendance-report' && request.method==='GET') return json({ok:true,data:await getAttendanceReport(env,url)});
     return json({ok:false,error:'Endpoint Admin tidak ditemukan.'},404);
   }catch(e){return json({ok:false,error:e.message||String(e)},e.status||400)}
 }
@@ -146,11 +149,39 @@ async function activateKiosk(env,admin,b){
   await audit(env,admin,'activate_kiosk','kiosk',d?.[0]?.kiosk_id||'',{deviceName});
   return{message:'Perangkat berhasil diaktifkan sebagai Kiosk Absensi.',kioskId:d?.[0]?.kiosk_id,deviceName,token};
 }
+async function renameKiosk(env,admin,id,b){
+  if(!id)throw new Error('Kiosk tidak valid.');
+  const deviceName=String(b.deviceName||'').trim();
+  if(!deviceName)throw new Error('Nama Kiosk wajib diisi.');
+  const rows=await supabaseRest(env,`/rest/v1/staff_kiosk_devices?kiosk_id=eq.${encodeURIComponent(id)}`,{method:'PATCH',headers:{'content-type':'application/json',Prefer:'return=representation'},body:JSON.stringify({device_name:deviceName})});
+  if(!rows?.length)throw new Error('Perangkat Kiosk tidak ditemukan.');
+  await audit(env,admin,'rename_kiosk','kiosk',id,{deviceName});
+  return{message:'Nama Kiosk berhasil diubah.',kioskId:id,deviceName};
+}
 async function revokeKiosk(env,admin,id){
   if(!id)throw new Error('Kiosk tidak valid.');
   await supabaseRest(env,`/rest/v1/staff_kiosk_devices?kiosk_id=eq.${encodeURIComponent(id)}`,{method:'PATCH',headers:{'content-type':'application/json',Prefer:'return=minimal'},body:JSON.stringify({active:false,revoked_at:new Date().toISOString()})});
   await audit(env,admin,'revoke_kiosk','kiosk',id);
   return{message:'Akses Kiosk perangkat dinonaktifkan.'};
+}
+async function deleteKiosk(env,admin,id){
+  if(!id)throw new Error('Kiosk tidak valid.');
+  const rows=await sbRows(env,'staff_kiosk_devices',{kiosk_id:`eq.${id}`,limit:'1'});
+  if(!rows[0])throw new Error('Perangkat Kiosk tidak ditemukan.');
+  await supabaseRest(env,`/rest/v1/staff_kiosk_devices?kiosk_id=eq.${encodeURIComponent(id)}`,{method:'DELETE',headers:{Prefer:'return=minimal'}});
+  await audit(env,admin,'delete_kiosk','kiosk',id,{deviceName:rows[0].device_name||''});
+  return{message:'Perangkat Kiosk berhasil dihapus permanen.'};
+}
+async function getAttendanceReport(env,url){
+  const month=String(url.searchParams.get('month')||'').trim();
+  if(!/^\d{4}-\d{2}$/.test(month))throw new Error('Bulan laporan tidak valid.');
+  const [y,m]=month.split('-').map(Number), next=new Date(Date.UTC(y,m,1));
+  const nextMonth=`${next.getUTCFullYear()}-${String(next.getUTCMonth()+1).padStart(2,'0')}-01`;
+  const start=`${month}-01`;
+  const q=new URLSearchParams({select:'*',attendance_date:`gte.${start}`,order:'attendance_date.asc,staff_name_snapshot.asc'});
+  q.append('attendance_date',`lt.${nextMonth}`);
+  const rows=await supabaseRest(env,`/rest/v1/staff_attendance?${q.toString()}`)||[];
+  return{month,rows:rows.map(mapAttendance)};
 }
 async function requireKiosk(request,env){
   const token=String(request.headers.get('x-kiosk-token')||'').trim();

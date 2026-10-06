@@ -1,7 +1,9 @@
 {
+  "id":"/legacy-staff-admin",
   "name":"Legacy Music Center Staff",
   "short_name":"Legacy Staff",
   "start_url":"/",
+  "scope":"/",
   "display":"standalone",
   "background_color":"#f6f8fb",
   "theme_color":"#f15a24",
